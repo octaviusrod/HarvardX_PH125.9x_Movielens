@@ -1,0 +1,847 @@
+---
+title: "Movielens Recommendation Project"
+subtitle: "HarvardX PH125.9x Capstone"
+author: "Octavio Rodríguez Ferreira"
+date: "05/04/2021"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Executive summary
+
+This project explores different approaches to reduce the error in a movie recommendation system. Starting with a benchmark of the mere `mean`, we develop our modeling process testing different algorithms starting with a simple prediction based on the average ratings. We then explore a baseline model that can measure the "effect" of certain variables on the rating. We add a regularized model that adds a penalty to our "effects" and chooses the best from a cross-validation of a range of values of lambda. Finally, we introduce a matrix factorization method known as `recosystem` which yielded the best results and was the most efficient in processing time. Overall, both the regularized and the `recosystem` algorithms managed to bring the `root mean square error` below the initial goal of `0.8649`, however `recosystem` was the most efficient in terms of processing time and reducing the RMSE.
+
+# 1. Introduction
+
+This is one of capstone projects that concludes the HarvardX PH125.9x ninth and final course in HarvardX's Data Science Professional Certificate series. For this project it is necessary to create a movie recommendation system  based on the example of the Netflix data challenge.
+
+For this purpose we will use the MovieLens 10M <https://grouplens.org/datasets/movielens/10m/>, a data set compiled by GroupLens, a research lab in the Department of Computer Science and Engineering at the University of Minnesota, Twin Cities. This particular data set contains 10 million ratings applied to 10,000 movies by 72,000 users.
+
+The final goal is to build a recommendation system through machine learning algorithms with a lower margin of error. In this case the success of our algorithm will be measured by the `root mean square error` or `RMSE`, and the goal is to get a number of `0.8649` or lower.
+
+The initial approaches taken in this analysis follow Irizarry (2019), starting with a baseline analysis of the effects of different predictors (movie, user, genre, etc.) in the movie rating. The next step, also following Irizarry, introduces regularization, to make our prediction more precise. Finally, the last step follows Chin, et al. (2016), and introduces a matrix factorization model called `recosystem`.
+
+The final analysis shows that the baseline model used initially gives a result very close to our `0.8649` error threshold, but still a little over. The regularized model improved our algorithm significantly reaching our threshold, but the processing time was significantly high. Finally, the recosystem model improved the algorithm exponentially bringing our RMSE way below our initial threshold.
+
+# 2. Data exploration
+
+```{r downloading_data, include=FALSE}
+#########################################################
+##############     INSTALLING PACKAGES     ##############
+#########################################################
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(dplyr)) install.packages("dplyr", repos = "http://cran.us.r-project.org")
+if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+if(!require(recosystem)) install.packages("recosystem", repos = "http://cran.us.r-project.org")
+if(!require(GGally)) install.packages("GGally", repos = "http://cran.us.r-project.org")
+if(!require(ggplot2)) install.packages("ggplot2", repos = "http://cran.us.r-project.org")
+if(!require(gridExtra)) install.packages("gridExtra", repos = "http://cran.us.r-project.org")
+if(!require(tinytex)) install.packages("tinytex", repos = "http://cran.us.r-project.org")
+
+#########################################################
+##############      LOADING LIBRARIES      ##############
+#########################################################
+
+library(tidyverse)
+library(caret)
+library(data.table)
+library(dplyr)
+library(lubridate)
+library(recosystem)
+library(GGally)
+library(ggplot2)
+library(gridExtra)
+library(tinytex)
+
+#########################################################
+##############     DOWNLOADING DATA SET    ##############
+#########################################################
+
+#Downloading the data set
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+#Loading "ratings" dataset and adding column names into a new element called "ratings"
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+#Loading "movies" dataset and adding column names into a new element called "movies"
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+#Converting strings into numeric data in the "movies" object in a dataframe (R 4.0 and later)
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+#Join "ratings" data into a new "movielens" dataframe
+movielens <- left_join(ratings, movies, by = "movieId")
+
+#Remove  temporary elements
+rm(dl, ratings, movies) 
+
+```
+
+## 2.1. Data
+
+```{r inexp_dim, include=FALSE}
+dim(movielens)
+```
+
+The MovieLens data set consists of `10,000,054` observations and `6` variables.
+
+```{r inexp_class, echo=FALSE}
+knitr::kable(sapply(lapply(movielens, class), "[", 1), col.names = c("Class"))
+```
+
+However, to perform our machine learning analysis, it is necessary to divide our data set in two different sets, one for training our algorithm and one for testing. Our training set will consist of 90% of the original set, and the test set will be the remaining 10%.
+
+```{r creating_sets, include=FALSE}
+# Creating test and validation sets for MovieLens data
+set.seed(1982, sample.kind="Rounding")
+
+#Creating a test index
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+
+#Test set
+edx <- movielens[-test_index,]
+
+#Validation set of 10% of MovieLens data
+temp <- movielens[test_index,]
+
+# Making sure userId and movieId in validation set are also in edx set. 
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+##To make sure we don’t include users and movies in the test set that do not appear in the training set, we remove these entries using the semi_join function:
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+#Remove all temporary elements that won't be needed in the analysis and keep the test and validation sets
+rm(test_index, temp, removed)
+
+```
+
+```{r set_exploration, include=FALSE}
+#Explore training and test sets. Check only the first observations
+head(edx)
+head(validation)
+
+#Number of rows and columns and structure of the train and test sets
+dim(edx)
+dim(validation)
+knitr::kable(sapply(lapply(edx, class), "[", 1), col.names = c("Class"))
+knitr::kable(sapply(lapply(validation, class), "[", 1), col.names = c("Class"))
+```
+
+Once we have created our train and test sets, the `edx` train set has `9,000,058` observations (rows) and `6` variables (columns), and the `validation` test set has `999,996` observations (rows) and `6` variables (columns). Variables in both sets have the same class and structure, also the same as in the original full set.
+
+## 2.2. Variable exploration
+
+After an initial exploration of we find that in our `edx` train set, there are `10,677` unique movies and `69,878` unique users. 
+
+```{r userNmovie, echo=FALSE}
+knitr::kable (edx %>% 
+  summarise("Unique users" = n_distinct(userId),
+            "Unique movies" = n_distinct(movieId)))
+```
+
+Also, we noticed that the most rated movies are not necessarily the best rated. In fact among the best rated are generally unknown or obscure films. This is the case since these films have very few ratings, sometimes only one.
+
+```{r topratedmovs, echo=FALSE}
+knitr::kable (edx %>% 
+                group_by(title) %>%
+                summarise(title = title[1],
+                          rating = mean(rating),
+                          n_ratings = n()) %>%
+                slice_max(rating, n=10) %>%
+                arrange(desc(rating)))
+```
+
+On the other hand, the most rated are very popular films that have a higher number of reviewers, bringing their average rating below those films very few reviewers.
+
+```{r mostratedmovs, message=FALSE, warning=FALSE, echo=FALSE}
+knitr::kable (edx %>% 
+                group_by(title) %>%
+                select(rating) %>%
+                summarise(title = title[1],
+                          n_ratings = n(),
+                          rating = mean(rating)) %>%
+                slice_max(n_ratings, n=10) %>%
+                arrange(desc(n_ratings)))
+```
+
+The `ratings` variable is the most important piece of data for our purpose in this data set. The rating system consists of a numeric scale from 0 to 5. In the train set there are 10 different ratings given by users to different movies. The ratings range from a minimum of 0.5 to a maximum of 5. The most common rating is "4" (`2,588,158` ratings of "4" given by users, and the least common is "0.5" (`85,549`). 
+
+```{r rtgs, echo=FALSE}
+knitr::kable(edx %>% group_by(Rating = rating) %>%
+  summarise(Total_ratings = n()) %>%
+  arrange(desc(Total_ratings)))
+```
+
+The vast majority of users have rated between 10 and 100 movies). The ratings given to each movie were varied and normally distributed, with the vast majority of movies receiving between 50 and 500 ratings. 
+
+```{r mean, include=FALSE}
+mean(edx$rating)
+```
+
+Overall, the average rating of all movies was `3.5`. Also, it is important to mention that while not all users have rated all movies, at least every user has rated one movie. This is important to know for our analysis.
+
+```{r rating_dist, include=FALSE}
+#Ratings distribution histogram
+hstgm <- edx %>% 
+  ggplot(aes(rating)) +
+  xlab("Rating") +
+  ylab("Number of ratings") + 
+  geom_histogram(bins = 10, binwidth = 0.5, color = "gray") + 
+  ggtitle("Rating Distribution") +
+  theme_light()
+
+#Ratings per user density plot
+dnst1 <- edx %>%
+  count(userId) %>% 
+  ggplot(aes(n)) + 
+  geom_density(fill = "gray") + 
+  scale_x_log10() + 
+  xlab("Ratings") +
+  ylab("Users") +
+  ggtitle("Ratings per user") +
+  theme_light()
+
+#Ratings per movie density plot
+dnst2 <- edx %>%
+  count(movieId) %>% 
+  ggplot(aes(n)) + 
+  geom_density(fill = "gray") + 
+  scale_x_log10() + 
+  xlab("Movies") +
+  ylab("Ratings") +
+  ggtitle("Ratings per movie")+
+  theme_light()
+```
+
+```{r plot_rating_dist, echo=FALSE}
+#Grid of distribution plots
+grid.arrange(hstgm, dnst1, dnst2, nrow=1)
+```
+
+From our initial overview of the data, we noticed that the `timestamp` variable contained observations with very large numbers that did not make much sense. The reason is that `timestamp` is in the "Epoch Unix Timestamp" which counts the number of seconds since January 1, 1970(UTC), to the time of the rating. While this is a standard measure, it is not easy to understand, specially when trying to find exact dates. Therefore we transformed it in two new variables that are easier to interpret.
+
+```{r tmstmp_conv, include=FALSE}
+#Create a new column with the date from the timestamp variable and an extra column with the year of rating. This function requires the "lubridate" package.
+edx <- edx %>%
+  mutate(date = as_datetime(timestamp)) %>%
+  mutate(rtg_year = as.integer(substr(date, 1, 4)))
+
+#Because we are making changes to the test set that would result in differences with the validation set, we will also make the same change in "validation."
+validation <- validation %>%
+  mutate(date = as_datetime(timestamp)) %>%
+  mutate(rtg_year = as.integer(substr(date, 1, 4)))
+```
+
+```{r rtgpyear, echo=FALSE}
+knitr::kable(edx %>% 
+  group_by("Rating year" = rtg_year)  %>%
+    count(movieId) %>%
+    summarise ("Movies rated" = n()) %>%
+  arrange(desc("Rating year")))
+```
+
+```{r plot_rtgpyear, echo=FALSE}
+#Plot of movies rated by year
+edx %>% group_by(movieId) %>%
+  summarize(n = n(), year = as.character(first(rtg_year))) %>%
+  ggplot(aes(year, n)) +
+  geom_boxplot(alpha = 0.5) +
+  coord_trans(y = "sqrt") + 
+  ggtitle("Movies rated by year")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+We also noticed that the `title` variable contains two different values, the title of the movie and the year of release in parenthesis. For the purposes of accuracy of our algorithm, we converted the column into two different variables: `title` and `year`. 
+
+```{r title_year, include=FALSE}
+##The criteria for separation is a pattern that finds only the years and not any other information that is in parenthesis. Mutate the year column as integers.
+edx <-  edx %>% 
+  mutate(title = str_trim(title)) %>%
+  extract(title, c("title", "year"), "^(.*) \\(([0-9]*)\\)$") %>% 
+  mutate(year = as.integer(year))
+
+#Because we are making changes to the test set that would result in differences with the validation set, we will also make the same change in "validation."
+validation <-  validation %>% 
+  mutate(title = str_trim(title)) %>%
+  extract(title, c("title", "year"), "^(.*) \\(([0-9]*)\\)$") %>% 
+  mutate(year = as.integer(year))
+```
+
+Once the title and the year are separate values we can determine, for example, films released by year, or the mean rating per year of release.
+
+```{r mov_year, message=FALSE, warning=FALSE,echo=FALSE}
+#Plot of movies released by year
+edx %>% group_by(movieId) %>%
+  summarize(n = n(), year = as.character(first(year))) %>%
+  ggplot(aes(year, n)) +
+  geom_point(color = "black", alpha = 0.3) +
+  coord_trans(y = "sqrt") + 
+  ggtitle("Movies released by year")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+```{r year_release_plots, message=FALSE, warning=FALSE, echo=FALSE}
+#Mean rating per year of release
+edx %>% 
+  group_by(year)  %>%
+  summarise("Mean_rating" = mean(rating)) %>%
+  ggplot(aes(year, Mean_rating)) +
+  geom_point(color = "gray") +
+  geom_smooth(color = "black") +
+  xlab("Year") +
+  ylab("Mean rating") +
+  ggtitle("Mean ratings per movie's year of release")+
+  theme_light()
+```
+
+From our initial overview of the data set we also noticed the `genres` variable sometimes contained more than one value (genre). Therefore, we proceeded to separate this column into unique values of "genre" per observation that would make our algorithm much more accurate.
+
+```{r genre_sep, include=FALSE}
+#Separate into unique values of genre per observation using the character "|" as the separator in the general expression pattern. 
+edx <- edx %>% 
+  mutate(genres = str_trim(genres)) %>%
+  separate_rows(genres, sep = "\\|")
+
+#Because we are making changes to the test set that would result in differences with the validation set, we will also make the same change in "validation."
+validation <- validation %>% 
+  mutate(genres = str_trim(genres)) %>%
+  separate_rows(genres, sep = "\\|")
+```
+
+Once we transform the `genre` variable into a `genres` variable with unique values of "genre" per observation, we now identify 20 unique genres, and each film is listed by every applicable genre, which means that the same film can constitute more than one observation since it can be included in more than one genre.
+
+```{r genres, echo=FALSE}
+#Movies per genre
+knitr::kable(edx %>% 
+  group_by(Genres = genres) %>%
+  summarise(Movies_per_genre = n()) %>%
+  arrange(desc(Movies_per_genre)))
+```
+
+We can now determine, for example, which are the most popular and less popular genres, and also what is the average rating per genre.  Here, "Film Noir" appears to be the most popular genre, whereas "Horror" the least popular. 
+
+```{r avg_genre, echo=FALSE}
+#Mean average by genre
+knitr::kable(edx %>% 
+               group_by(Genres = genres) %>%
+               summarise(Mean_rating = mean(rating)) %>%
+               arrange(desc(Mean_rating)))
+```
+
+Every single genre seems to have had a consistent popularity since 1995, but horror, mystery and thriller film popularity seems to have plateaued from an initial high popularity. IMAX films have fluctuated more, with increases and decreases, and an apparent gaining popularity over the last years recorded in our data.
+
+```{r mean_py_pgen, message=FALSE, warning=FALSE, echo=FALSE}
+edx %>% 
+  group_by(rtg_year, genres)  %>%
+  summarise(Mean_rating = mean(rating)) %>%
+  ggplot(aes(rtg_year, Mean_rating)) +
+  geom_point(aplha = 0.03, color = "gray") +
+  geom_smooth(color = "black") +
+  facet_wrap(~ genres) +
+  xlab("Year") +
+  ylab("Mean rating") +
+  ggtitle("Mean ratings per year of rating per genre")+
+  theme_light()
+```
+
+With all the previous adjustments, our training data set was modified to `23,368,968` observations, and by adding `3` new variables, the data set had a total of `9`.
+
+```{r nu_dims, echo=FALSE}
+knitr::kable(sapply(lapply(edx, class), "[", 1), col.names = c("Class"))
+```
+
+## 3. Methods and analysis
+
+To compare the different models and algorithms, determine the typical error and define the accuracy of our models we used used the root mean squared error (RMSE).
+
+$$ RMSE = \sqrt{\frac{1}{N} \sum_{u,i}^{} \left( \hat{y}_{u,i} - y_{u,i} \right)^2 } $$
+
+In terms of code, the RMSE is calculated through the following function
+
+```{r rmse, results='hide'}
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+
+We also made an extra partition of of our training set to train the best algorithms in a much smaller data set, which means less processing time.
+
+```{r extra_part, include=FALSE}
+# Creating test and validation sets for MovieLens data
+set.seed(1982, sample.kind="Rounding")
+
+#Creating a test index
+test_index <- createDataPartition(y = edx$rating, times = 1, p = 0.5, list = FALSE)
+
+#Train set
+train_set <- edx[-test_index,]
+
+#Test set
+temp <- edx[test_index,]
+
+# Making sure userId and movieId in validation set are in both sets
+test_set <- temp %>% 
+  semi_join(train_set, by = "movieId") %>%
+  semi_join(train_set, by = "userId")
+
+# Add rows removed back
+removed <- anti_join(temp, test_set)
+train_set <- rbind(train_set, removed)
+
+#Remove all temporary elements
+rm(test_index, temp, removed)
+```
+
+## 3.1. Naive model
+
+Following Irizarry (2021) our first approach was to start with a "naive model" (not related to a Naïve Bayes analysis), which is a simple prediction based on the average ratings. The simplest possible prediction we can make, then is based on the ratings mean, which we already know that is `3.5`. 
+
+$$ Y_{u,i} = \mu + \varepsilon_{u,i} $$
+
+```{r mu, include=FALSE}
+mu <- mean(train_set$rating)
+naive_rmse <- RMSE(test_set$rating, mu)
+naive_res <- tibble(method = "Naive Model", RMSE = naive_rmse)
+```
+
+This initial approach yielded an RMSE of `1.05` which is far from our threshold, but served as a benchmark to compare future results.
+
+## 3.2. Baseline models
+
+Following Irizarry (2021) we built a baseline model that can measure the "effect" of certain variables on the rating of the film in specific. This initial approach is the same used in the Belkor Solution to the Netflix Prize challenge  <https://www.netflixprize.com/assets/GrandPrize2009_BPC_BellKor.pdf>.
+
+For example, as we saw, certain movies tend to be rated higher than others and some tend to be more rated that others. So, our first baseline model took the "Movie effect" `b_i`, along with our mean rating $mu$ as our predictors. This model can be interpreted in math and code notation as follows:
+
+$$ Y_{u,i} = \mu + b_i + \varepsilon_{u,i} $$
+
+```{r code_naive, results='hide'}
+#Movie averages
+movie_avgs <- train_set %>% 
+  group_by(movieId) %>% 
+  summarise(b_i = mean(rating - mu))
+
+#Predict the influence of the "Movie Effect" in the rating.
+predicted_ratings <- mu + test_set %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  .$b_i
+
+#We validate our prediction the test set.
+rmse_bi <- RMSE(predicted_ratings, test_set$rating)
+```
+
+```{r rmse_bi, include=FALSE}
+#Include the results in a table of RMSEs results
+bl_rmse_res <- tibble(method="Movie",
+                                 RMSE = rmse_bi)
+
+#Results
+bl_rmse_res
+```
+
+The initial result yielded a `0.94` RMSE on our reduced test set, which was an improvement from the naive model. Since this model seemed to be improving our RMSE we analyzed more predictors to determine how much accurate our algorithm could be.
+
+```{r bl_models, include=FALSE}
+##### MOVIE+USER EFFECT ##### 
+#User averages
+user_avgs <- train_set %>%
+  left_join(movie_avgs, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_i))
+
+#We predict the influence of the "User Effect" in the rating.
+predicted_ratings <- test_set %>%
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  .$pred
+
+#We validate our prediction the test set.
+rmse_biu <- RMSE(predicted_ratings, test_set$rating)
+
+#And include the results in a table of RMSEs results
+bl_rmse_res <- bind_rows(bl_rmse_res, 
+                          tibble(method="Movie+User",
+                                 RMSE = rmse_biu))
+
+##### MOVIE+USER+GENRE EFFECT ##### 
+## Genre averages
+genre_avgs <- train_set %>%
+  left_join(movie_avgs, by="movieId") %>%
+  left_join(user_avgs, by='userId') %>%
+  group_by(genres) %>%
+  summarise(b_g = mean(rating - mu - b_i - b_u))
+
+#We predict the influence of the "Genre Effect" in the rating along with our other effects.
+predicted_ratings <- test_set %>%
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  left_join(genre_avgs, by='genres') %>%
+  mutate(pred = mu + b_i + b_u + b_g) %>%
+  .$pred
+
+#We validate our prediction the test set.
+rmse_biug <- RMSE(predicted_ratings, test_set$rating)
+
+#And include the results in a table of RMSEs results
+bl_rmse_res <- bind_rows(bl_rmse_res, 
+                          tibble(method="Movie+User+Genre",
+                                 RMSE = rmse_biug))
+
+##### MOVIE+USER+GENRE+YEAR EFFECT ##### 
+## Year averages
+year_avgs <- train_set %>%
+  left_join(movie_avgs, by="movieId") %>%
+  left_join(user_avgs, by='userId') %>%
+  left_join(genre_avgs, by='genres') %>%
+  group_by(year) %>%
+  summarise(b_y = mean(rating - mu - b_i - b_u - b_g))
+
+#We predict the influence of the "Year Effect" in the rating along with our other effects.
+predicted_ratings <- test_set %>%
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  left_join(genre_avgs, by='genres') %>%
+  left_join(year_avgs, by='year') %>%
+  mutate(pred = mu + b_i + b_u + b_g + b_y) %>%
+  .$pred
+
+#We validate our prediction the test set.
+rmse_biugy <- RMSE(predicted_ratings, test_set$rating)
+
+#And include the results in a table of RMSEs results
+bl_rmse_res <- bind_rows(bl_rmse_res, 
+                          tibble(method="Movie+User+Genre+Year",
+                                 RMSE = rmse_biugy))
+```
+
+We considered many assumptions to determine which variables to include in the algorithm. For example, that it appears logical to assume that a user who rates one film would rate similarly other movies of the same genre. Thus, calculating the "Genre Effect" would be extremely relevant. Likewise, we considered that people would like movies released in similar years. That is to say, a person that liked a classic film, might also like other classic films. This wasn't a compelling enough hypothesis from the beginning, but we wanted to test it anyway, to see if it improved the overall accuracy of the algorithm. Based on the above, we built algorithms considering the effects of movie, user, genre, and release year.
+
+```{r bl_results, echo=FALSE}
+bl_rmse_res %>% knitr::kable()
+```
+
+While every model showed an improvement, after calculating the "User effect" the improvements were getting more marginal and the processing time was increasing.
+
+## 3.3. Regularizaed models
+
+As stated by Irizari (2021), we had to be aware of over-training in our data. For example, while the estimate for the first movie can be very precise, the following movies estimates will be the "observed deviation from the average rating which is an estimate based on just one number," and it will not be as precise. To avoid this we also penalized the estimates to constrain the total variability and avoid over-training. Thus we introduced regularization to our second type of models. Adding a penalty to the values of $b$ (the different effects), minimized our model's RMSE. The model equations is represented as follows:
+
+$$ \frac{1}{N}\sum_{u,i} \left(y_{u,i} - \mu - b_i\right)^2 + \lambda \sum_{i} b_i^2  $$
+
+The method for regularization used a similar approach as the baseline models, but this time we added a tuning parameter $lambda$. With cross-validation of a range of values of $lambda$, we then chose the one that generated the smaller error to be included in our model.
+
+```{r reg_b_mod, results='hide'}
+
+#We define our values of lambda
+lambdas <- seq(0, 10, 0.1)
+
+#Regularized Movie
+rmses <- sapply(lambdas, function(l) {
+  b_i <- train_set %>%
+    group_by(movieId) %>%
+    summarise(b_i = sum(rating - mu) / (n() + l))
+  predicted_ratings <- test_set %>%
+    left_join(b_i, by='movieId') %>%
+    mutate(pred = mu + b_i) %>%
+    .$pred
+  return(RMSE(predicted_ratings, test_set$rating))
+})
+
+#Best value of lambda
+lambdas[which.min(rmses)]
+
+#Now we include this value of lambda in our model.
+rmse_reg_bi <- min(rmses)
+
+#And include the results in a table of RMSEs results
+regbi_rmse_res <- tibble(method="Regularized Movie",
+                                 RMSE = rmse_reg_bi)
+
+```
+
+For the first of our regularized models, we considered the "Movie Effect" and included the best value of $lambda$.
+
+```{r reg_b_lamba, echo=FALSE}
+qplot(lambdas, rmses)
+```
+
+The model yielded very similar results to the equivalent baseline model, however, we did noticed a slight improvement.
+
+```{r reg_b_tab, echo=FALSE}
+#Results table
+regbi_rmse_res %>% knitr::kable()
+```
+
+Following what we found on the baseline models we assumed that adding more regularized predictors to our model would increase our overall accuracy. Nevertheless, as we proceeded, we noticed that adding more than two values of $b$ (the different effects), increased the processing time to a point that was no longer viable. 
+
+```{r regbi_mod, include=FALSE}
+#Regularized Movie+User
+
+rmses <- sapply(lambdas, function(l) {
+  b_i <- train_set %>%
+    group_by(movieId) %>%
+    summarise(b_i = sum(rating - mu) / (n() + l))
+  b_u <- train_set %>%
+    left_join(b_i, by='movieId') %>%
+    group_by(userId) %>%
+    summarise(b_u = sum(rating - b_i - mu) / (n() + l))
+  predicted_ratings <- test_set %>%
+    left_join(b_i, by='movieId') %>%
+    left_join(b_u, by='userId') %>%
+    mutate(pred = mu + b_i + b_u) %>%
+    .$pred  
+  return(RMSE(predicted_ratings, test_set$rating))
+})
+
+#Best value of lambda
+lambda <- lambdas[which.min(rmses)]
+lambda
+
+#Include the lowest value of lambda in our model.
+rmse_reg_biu <- min(rmses)
+
+#And include the results in a table of RMSEs results
+regbi_rmse_res <- bind_rows(regbi_rmse_res, 
+                          tibble(method="Regularized Movie+User",
+                                 RMSE = rmse_reg_biu))
+```
+
+```{r regbi_tab, echo=FALSE}
+regbi_rmse_res %>% knitr::kable()
+```
+
+Thus we decided to stick win only the "Movie" and "User" effects, considering that, by itself this model was already a significant improvement, to the point that it could let us at the or even below our threshold. 
+
+## 3.4. Matrix factorization model
+
+According to Chin, et al. (2016) a "popular technique to solve the recommender[sic] system problem is the matrix factorization method." Chin introduces the `recosystem` package <https://cran.r-project.org/web/packages/recosystem/vignettes/introduction.html>, "an R wrapper of the LIBMF library developed by Yu-Chin Juan, Wei-Sheng Chin, Yong Zhuang, Bo-Wen Yuan, Meng-Yuan Yang, and Chih-Jen Lin" (Chin, et al. 2016). According to Chin, "LIBMF (and hence recosystem) can significantly reduce memory use, for instance the constructed model that contains information for prediction can be stored in the hard disk, and output result can also be directly written into a file rather than be kept in memory." Also, according to Chin, `recosystem` provides "convenient functions"  to solve "the matrices P and Q" and "additionally have functions for model exporting (outputing P and Q matrices) and prediction."
+
+The basic idea behind `recosystem` consists in "approximate the whole rating matrix Rm×n by the product of two matrices of lower dimensions, Pk×m and Qk×n such that R≈P′Q" with "pu be the u-th column of P, and qv be the v-th column of Q, then the rating given by user u on item v would be predicted as p′uqv." 
+
+Here we apply the solution to this optimization problem given by Chin et al., where "(u,v) are locations of observed entries in R, ru,v is the observed rating, f is the loss function, and μP,μQ,λP,λQ are penalty parameters to avoid overfitting" (Chin, Zhuang, et al. 2015a, 2015b):
+
+$$minP,Q∑(u,v)∈R[f(pu,qv;ru,v)+μP||pu||1+μQ||qv||1+λP2||pu||22+λQ2||qv||22]$$
+
+The `recosystem` algorithm requires a `user_index`, an `item_index`, and the `rating`. The `user_index` is an integer vector giving the user indices of rating scores, `item_index` is an integer vector giving the item (movieId) indices of rating scores, and `rating` is a numeric vector of the observed entries in the rating matrix. If the `user index`,  `item index`,  and `ratings` are stored as R vectors in memory, they can be passed  via function `data_memory()`.
+
+```{r reco, results='hide'}
+#Set seed
+set.seed(1982, sample.kind = "Rounding")
+
+#Create a special train set for the matrix factorization analysis
+train_rec_mf <-  with(train_set, 
+                      data_memory(user_index = userId,
+                                  item_index = movieId,
+                                  rating     = rating))
+
+#Create a special test set for the matrix factorization analysis
+test_rec_mf  <-  with(test_set,  
+                      data_memory(user_index = userId,
+                                  item_index = movieId,
+                                  rating     = rating))
+#Create a model object (a Reference Class object in R) by calling Reco().
+r <- recosystem::Reco()
+
+#Call the $tune() method to select best tuning parameters along a set of candidate values.
+opts <- r$tune(train_rec_mf, 
+               opts = list(dim = 30, 
+                           lrate = c(0.1, 0.2),
+                           costp_l2 = 0.1, 
+                           costq_l2 = 0.1,
+                           nthread  = 4, 
+                           niter = 10))
+
+#Train the model by calling the $train() method. A number of parameters can be set inside the function, possibly coming from the result of $tune()
+r$train(train_rec_mf, 
+        opts = c(opts$min, nthread = 4, niter = 30))
+
+#Predict the rating of the matrix factorization analysis.
+predicted_ratings <-  r$predict(test_rec_mf, out_memory())
+
+#Validate prediction on the test set.
+rmse_reco_mf <- RMSE(predicted_ratings, test_set$rating)
+
+#Add results to table
+reco_rmse_res <- tibble(method= "Recosystem Matrix Factorization",
+                        RMSE = rmse_reco_mf)
+```
+
+The `recosystem` analysis improved our model exponentially, to the point that that we were confident of bringing RMSE way below the threshold when called into the larger data set. 
+
+```{r, recotab, echo=FALSE}
+#Table results
+knitr::kable(reco_rmse_res)
+```
+
+Up to this point we were conducting experiment with a smaller subset of the training data. Once we trained our different models, we want to see how they operate in the larger training and test sets.
+
+# 4. Results
+
+Based on our experiments we proceeded to train the different models in the larger data set. We decided to include the naive model as an initial benchmark to document improvement.
+
+```{r naive_final, results='hide'}
+# Simplest possible prediction is the ratings mean
+mu <- mean(edx$rating)
+mu
+
+# Computing the predicted ratings on the train set. This model only takes the average rating.
+naive_rmse <- RMSE(validation$rating, mu)
+naive_rmse
+
+# We store our results in a data frame to be able to compare the different results of our models.
+rmse_results <- tibble(method = "Naive Model", RMSE = naive_rmse)
+rmse_results
+```
+
+Then, we incorporated one of the baseline models. For the baseline model we decided to that included the "Movie" and "User effects". We chose only this two parameters since the margin of improvement including more parameters was not that significant.
+
+```{r baseline_final, results='hide'}
+#User averages
+user_avgs <- edx %>%
+  left_join(movie_avgs, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_i))
+
+#We predict the influence of the "User Effect" in the rating.
+predicted_ratings <- validation %>%
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  .$pred
+
+#We validate our prediction the test set.
+rmse_biu <- RMSE(predicted_ratings, validation$rating)
+
+#And include the results in a table of RMSEs results
+rmse_results <- bind_rows(rmse_results, 
+                         tibble(method="Baseline Movie+User",
+                                RMSE = rmse_biu))
+```
+
+Then we incorporated the regularized model that included the penalized "Movie" and "User effects", with the the best value of $lambda$. As with the naive morel, here we also chose only  two parameters since the margin of improvement including more parameters was not that significant, but most importantly because it was no longer viable due to the processing time and system capability.
+
+```{r reg_baseline_final, results='hide'}
+#Set seed
+set.seed(1982, sample.kind = "Rounding")
+
+#During my test I found the best lambda to be over 10, therefore I set my lambdas to be between 10 and 20.
+#We define our values of lambda. 
+lambdas <- seq(10, 20, 0.1)
+
+#Regularized Movie+User
+final_rmses <- sapply(lambdas, function(l) {
+  b_i <- edx %>%
+    group_by(movieId) %>%
+    summarise(b_i = sum(rating - mu) / (n() + l))
+  b_u <- edx %>%
+    left_join(b_i, by='movieId') %>%
+    group_by(userId) %>%
+    summarise(b_u = sum(rating - b_i - mu) / (n() + l))
+  predicted_ratings <- validation %>%
+    left_join(b_i, by='movieId') %>%
+    left_join(b_u, by='userId') %>%
+    mutate(pred = mu + b_i + b_u) %>%
+    .$pred  
+  return(RMSE(predicted_ratings, validation$rating))
+})
+
+#Include the lowest value of lambda in our model.
+rmse_reg_biu <- min(final_rmses)
+
+#And include the results in a table of RMSEs results
+rmse_results <- bind_rows(rmse_results, 
+                            tibble(method="Regularized Movie+User",
+                                   RMSE = rmse_reg_biu))
+```
+
+```{r regb_lambda_final, echo=FALSE}
+qplot(lambdas, final_rmses)
+```
+
+Finally, we incorporated the `recosystem` matrix factorization model.
+
+```{r reco_final, results='hide'}
+#Set seed
+set.seed(1982, sample.kind = "Rounding")
+
+#Create a special train set for the matrix factorization analysis
+train_rec_mf <-  with(edx, data_memory(user_index = userId,
+                                             item_index = movieId,
+                                             rating     = rating))
+
+#Create a special test set for the matrix factorization analysis
+test_rec_mf  <-  with(validation,  data_memory(user_index = userId, 
+                                             item_index = movieId, 
+                                             rating     = rating))
+
+#Create a model object (a Reference Class object in R) by calling `Reco()`.
+r <- recosystem::Reco()
+
+#Call the $tune() method to select best tuning parameters along a set of candidate values.
+opts <- r$tune(train_rec_mf, opts = list(dim = 30, 
+                                         lrate = c(0.1, 0.2),
+                                         costp_l2 = 0.1, 
+                                         costq_l2 = 0.1,
+                                         nthread  = 4, 
+                                         niter = 10))
+
+#Train the model by calling the $train() method.
+r$train(train_rec_mf, opts = c(opts$min, nthread = 4, niter = 30))
+
+#Predict the rating of the matrix factorization analysis.
+predicted_ratings <-  r$predict(test_rec_mf, out_memory())
+
+#Validate prediction on the test set.
+rmse_reco_mf <- RMSE(predicted_ratings, validation$rating)
+
+#Add to results table
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Recosystem Matrix Factorization",
+                                 RMSE = rmse_reco_mf ))
+```
+
+The different models tested in the larger data set proved our initial assumptions.
+
+```{r mod_tab_final, echo=FALSE}
+rmse_results %>% knitr::kable()
+```
+
+First, the regularized model improved the accuracy much better than the simple baseline models. Nevertheless, the `recosystem` matrix factorization analysis proved to be the best, and improved significantly the accuracy of our prediction, much better that we initially anticipated. Also, the processing time for this algorithm was way less than the regularized model, making it a better option four our purpose.
+
+# 5. Conclusion
+
+Recommendation systems are becoming more and more important as we increased our consumption of digital goods. Thus the importance of creating ML algorithms that reduce significantly the error in prediction. In our case the process was complicated due to the impossibility to use more common ML algorithms such as `random forests` or `logistical regression`. 
+
+Initially the only approach possible appeared to be the Belkor Solution to the Netflix Prize challenge, also replicated by Irizarry (2021). However, after considerable research, we were able to find the `recosystem` approach, which, as seen above not only yielded the best results, but was the most efficient in processing time.
+
+Approaches like the `recosystem` analysis show how can we keep improving recommendation systems, specially as more and more data becomes available and more platforms depend on such systems to offer their digital contents to an ever-growing pool of users.
+
+# 6. Sources
+
+Chin, et al. (2016). LIBMF: A Library for Parallel Matrix Factorization inShared-memory Systems. Journal of Machine Learning Research 17, 1-5. <https://www.csie.ntu.edu.tw/~cjlin/papers/libmf/libmf_open_source.pdf>
+
+GroupLens (2021). MovieLens 10M. <https://grouplens.org/datasets/movielens/10m/>.
+
+Irizarry (2021). Introduction to Data Science: Data Analysis and Prediction Algorithms with R. <https://rafalab.github.io/dsbook/>
+
+Koren, Yehuda (2009). The BellKor Solution to the Netflix Grand Prize. <https://www.netflixprize.com/assets/GrandPrize2009_BPC_BellKor.pdf>.
+
+Qiu, Yixuan (2021). recosystem: Recommender System Using Parallel Matrix Factorization. <https://cran.r-project.org/web/packages/recosystem/vignettes/introduction.html>.
